@@ -1,0 +1,53 @@
+services:
+  broker-mqtt:
+    image: eclipse-mosquitto
+    container_name: broker-mqtt
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+    networks:
+      - minha_rede
+
+  controlador-1:
+    build: ./controlador
+    container_name: controlador-1
+    depends_on:
+      - broker-mqtt
+    environment:
+      - CONTROLLER_ID=Controlador_1
+      - CONTROLLER_PORT=9000
+      - ESTADO_RAFT=LIDER
+      - PEERS_RPC=controlador-2:9000,controlador-3:9000
+    networks:
+      - minha_rede
+
+  controlador-2:
+    build: ./controlador
+    container_name: controlador-2
+    depends_on:
+      - broker-mqtt
+    environment:
+      - CONTROLLER_ID=Controlador_2
+      - CONTROLLER_PORT=9000
+      - ESTADO_RAFT=SEGUIDOR
+      - PEERS_RPC=controlador-1:9000,controlador-3:9000
+    networks:
+      - minha_rede
+  
+  controlador-3:
+    build: ./controlador
+    container_name: controlador-3
+    depends_on:
+      - broker-mqtt
+    environment:
+      - CONTROLLER_ID=Controlador_3
+      - CONTROLLER_PORT=9000
+      - ESTADO_RAFT=SEGUIDOR
+      - PEERS_RPC=controlador-1:9000,controlador-2:9000
+    networks:
+      - minha_rede
+  
+networks:
+  minha_rede:
+    driver: bridge
