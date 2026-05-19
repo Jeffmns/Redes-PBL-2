@@ -17,7 +17,6 @@ services:
     environment:
       - CONTROLLER_ID=Controlador_1
       - CONTROLLER_PORT=9000
-      - ESTADO_RAFT=LIDER
       - PEERS_RPC=controlador-2:9000,controlador-3:9000
     networks:
       - minha_rede
@@ -30,7 +29,6 @@ services:
     environment:
       - CONTROLLER_ID=Controlador_2
       - CONTROLLER_PORT=9000
-      - ESTADO_RAFT=SEGUIDOR
       - PEERS_RPC=controlador-1:9000,controlador-3:9000
     networks:
       - minha_rede
@@ -43,8 +41,47 @@ services:
     environment:
       - CONTROLLER_ID=Controlador_3
       - CONTROLLER_PORT=9000
-      - ESTADO_RAFT=SEGUIDOR
       - PEERS_RPC=controlador-1:9000,controlador-2:9000
+    networks:
+      - minha_rede
+
+  sensor-norte:
+    build: ./sensor
+    container_name: sensor-norte
+    depends_on:
+      - broker-mqtt
+    environment:
+      - SETOR_NOME=Norte
+    networks:
+      - minha_rede
+
+  sensor-sul:
+    build: ./sensor
+    container_name: sensor-sul
+    depends_on:
+      - broker-mqtt
+    environment:
+      - SETOR_NOME=Sul
+    networks:
+      - minha_rede
+
+  drone-01:
+    build: ./drone
+    container_name: drone-01
+    depends_on:
+      - broker-mqtt
+    environment:
+      - DRONE_ID=drone_01
+    networks:
+      - minha_rede
+  
+  drone-02:
+    build: ./drone
+    container_name: drone-02
+    depends_on:
+      - broker-mqtt
+    environment:
+      - DRONE_ID=drone_02
     networks:
       - minha_rede
   
