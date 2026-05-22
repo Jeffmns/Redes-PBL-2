@@ -88,6 +88,15 @@ func pesoGravidade(g string) int {
 	}
 }
 
+// Função auxiliar para evitar que o RPC trave o sistema
+func DialComTimeout(network, address string, timeout time.Duration) (*rpc.Client, error) {
+	conn, err := net.DialTimeout(network, address, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return rpc.NewClient(conn), nil
+}
+
 // ==========================================
 // 3. O SERVIÇO RPC (As funções chamadas via rede)
 // ==========================================
@@ -181,7 +190,7 @@ func (c *Controlador) IniciarMotorRaft() {
 			req := RequisicaoPing{Termo: c.TermoAtual, LiderID: c.ID}
 			for _, peer := range c.PeersRPC {
 				go func(p string) {
-					clienteRPC, err := rpc.Dial("tcp", p)
+					clienteRPC, err := DialComTimeout("tcp", p, 500*time.Millisecond)
 					if err == nil {
 						clienteRPC.Call("ServicoRaft.Ping", &req, &RespostaPing{})
 						clienteRPC.Close()
@@ -220,7 +229,7 @@ func (c *Controlador) IniciarMotorRaft() {
 				req := RequisicaoVoto{Termo: meuTermo, CandidatoID: c.ID}
 				var res RespostaVoto
 
-				clienteRPC, err := rpc.Dial("tcp", peer)
+				clienteRPC, err := DialComTimeout("tcp", peer, 500*time.Millisecond)
 				if err == nil {
 					err = clienteRPC.Call("ServicoRaft.PedirVoto", &req, &res)
 					if err == nil && res.VotoConcedido {
@@ -275,7 +284,7 @@ func (c *Controlador) AoReceberAlertaMQTT(client mqtt.Client, msg mqtt.Message) 
 		req := RequisicaoLog{DroneID: droneEscolhido.ID, Status: "OCUPADO", Setor: alerta.Setor}
 		votos := 1
 		for _, peer := range c.PeersRPC {
-			cliente, err := rpc.Dial("tcp", peer)
+			cliente, err := DialComTimeout("tcp", peer, 500*time.Millisecond)
 			if err == nil {
 				var res RespostaLog
 				if cliente.Call("ServicoRaft.SincronizarLog", &req, &res) == nil && res.Sucesso {
@@ -301,7 +310,7 @@ func (c *Controlador) AoReceberAlertaMQTT(client mqtt.Client, msg mqtt.Message) 
 		votosFila := 1
 
 		for _, peer := range c.PeersRPC {
-			cliente, err := rpc.Dial("tcp", peer)
+			cliente, err := DialComTimeout("tcp", peer, 500*time.Millisecond)
 			if err == nil {
 				var resFila RespostaFila
 				if cliente.Call("ServicoRaft.SincronizarFila", &reqFila, &resFila) == nil && resFila.Sucesso {
@@ -352,7 +361,7 @@ func (c *Controlador) AoReceberStatusDrone(client mqtt.Client, msg mqtt.Message)
 	req := RequisicaoLog{DroneID: status.DroneID, Status: status.Status, Setor: "base"}
 	votos := 1
 	for _, peer := range c.PeersRPC {
-		cliente, err := rpc.Dial("tcp", peer)
+		cliente, err := DialComTimeout("tcp", peer, 500*time.Millisecond)
 		if err == nil {
 			var res RespostaLog
 			if cliente.Call("ServicoRaft.SincronizarLog", &req, &res) == nil && res.Sucesso {
@@ -387,7 +396,7 @@ func (c *Controlador) AoReceberStatusDrone(client mqtt.Client, msg mqtt.Message)
 			reqFila := RequisicaoFila{Acao: "REMOVER"}
 			for _, peer := range c.PeersRPC {
 				go func(p string) {
-					cliente, err := rpc.Dial("tcp", p)
+					cliente, err := DialComTimeout("tcp", p, 500*time.Millisecond)
 					if err == nil {
 						cliente.Call("ServicoRaft.SincronizarFila", &reqFila, &RespostaFila{})
 						cliente.Close()
@@ -405,6 +414,8 @@ func (c *Controlador) AoReceberStatusDrone(client mqtt.Client, msg mqtt.Message)
 }
 
 func main() {
+	fmt.Println("[Sistema] Aguardando 10s para o cluster MQTT estabilizar...")
+	time.Sleep(10 * time.Second)
 	rand.Seed(time.Now().UnixNano())
 
 	meuID := os.Getenv("CONTROLLER_ID")

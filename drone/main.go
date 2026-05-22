@@ -61,6 +61,8 @@ func aoReceberMissao(client mqtt.Client, msg mqtt.Message) {
 }
 
 func main() {
+	fmt.Println("[Sistema] Aguardando 10s para o cluster MQTT estabilizar...")
+	time.Sleep(10 * time.Second)
 	meuID = os.Getenv("DRONE_ID")
 	if meuID == "" {
 		meuID = "drone_desconhecido"
