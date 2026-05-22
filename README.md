@@ -24,7 +24,7 @@ Para evitar que dois drones sejam enviados para a mesma ocorrência (garantia de
 Se você não tiver um arquivo `.env` configurado, o sistema assume valores padrões (default fallbacks) para rodar inteiramente de forma local na rede isolada do Docker.
 
 ```bash
-docker-compose up --
+docker-compose up --build
 ```
 
 O sistema realiza todas as ações automaticamente, não possuindo um terminal interativo, pois isso simularia melhor as solicitações dos setores acontecendo de forma autônoma de acordo aos sensores.
