@@ -19,12 +19,53 @@ Para evitar que dois drones sejam enviados para a mesma ocorrência (garantia de
 * **Fila de Prioridade:** Os eventos que excedem a capacidade de atendimento imediato são ordenados em memória pela `Gravidade` da emergência e desempatados pelo tempo de chegada (`Timestamp` ISO 8601).
 * **Self-Healing e Resiliência:** Se o Líder falhar, a comunicação RPC utiliza *Timeouts* de 500ms que evitam travamentos em cascata. Os seguidores detectam o silêncio e iniciam uma nova eleição quase instantaneamente.
 
-## Como Executar Localmente (Modo Desenvolvimento)
+## Como executar localmente
 
 Se você não tiver um arquivo `.env` configurado, o sistema assume valores padrões (default fallbacks) para rodar inteiramente de forma local na rede isolada do Docker.
 
 ```bash
-docker compose up --
+docker-compose up --
 ```
 
 O sistema realiza todas as ações automaticamente, não possuindo um terminal interativo, pois isso simularia melhor as solicitações dos setores acontecendo de forma autônoma de acordo aos sensores.
+
+## Como executar em múltiplas máquinas
+
+Para distribuir o sistema entre os computadores, utilizamos as variáveis de ambiente.
+
+1. Na raiz do projeto de **cada computador**, crie um arquivo `.env` mapeando os IPs físicos correspondentes. Exemplo:
+
+    # IPs do MQTT
+    IP_EMQX_1=172.16.103.4
+    PORT_EMQX_1=1883
+    IP_EMQX_2=172.16.103.4
+    PORT_EMQX_2=1884
+    IP_EMQX_3=172.16.103.4
+    PORT_EMQX_3=1885
+    
+    # IPs dos Controladores na rede física
+    IP_CTRL_1=172.16.103.3
+    PORT_CTRL_1=9001
+    IP_CTRL_2=172.16.103.2
+    PORT_CTRL_2=9002
+    IP_CTRL_3=172.16.103.2
+    PORT_CTRL_3=9003
+
+2. Suba os serviços em cada máquina individualmente utilizando a flag `--no-deps`. Isso força o Docker a iniciar apenas o que você pedir, ignorando o restante da topologia que está fisicamente em outro PC.
+
+**Na Máquina Central do Cluster MQTT:**
+
+    docker-compose up emqx1 emqx2 emqx3
+
+**Nas Máquinas dos Nós (Controladores, Sensores e Drones):**
+
+    docker-compose up --no-deps controlador-1 sensor-norte drone-01
+    docker-compose up --no-deps controlador-2 controlador-3 sensor-sul drone-02
+
+## Teste de Confiabilidade
+
+Para provar a robustez arquitetural e a tolerância a falhas na prática, você pode derrubar propositalmente o principal da operação executando:
+
+    docker-compose stop controlador-1
+
+Você poderá observar nos logs em tempo real que os Controladores Seguidores iniciarão uma nova eleição, um novo Líder vai assumir o controle do processamento, e o sistema vai continuar operando sem perder eventos e sem duplicar o envio de drones.
