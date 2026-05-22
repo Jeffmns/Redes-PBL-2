@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -67,13 +67,32 @@ func main() {
 	}
 
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker("tcp://broker-mqtt:1883")
+	// Leia a variável BROKERS do ambiente (lembre-se de importar o pacote "strings")
+	brokersEnv := os.Getenv("BROKERS")
+	if brokersEnv == "" {
+		brokersEnv = "tcp://localhost:1883" // Fallback seguro
+	}
+
+	// Separe pela vírgula e adicione cada um deles nas opções do MQTT
+	listaBrokers := strings.Split(brokersEnv, ",")
+	for _, brokerURL := range listaBrokers {
+		opts.AddBroker(brokerURL)
+	}
 	opts.SetClientID("Cliente_MQTT_" + meuID)
 
 	mqttClient = mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("Erro ao conectar no broker: %v", token.Error())
+	fmt.Println("[Rede] Tentando conectar ao cluster MQTT...")
+	for {
+		token := mqttClient.Connect()
+		token.Wait()
+		if token.Error() == nil {
+			break
+		}
+
+		fmt.Printf("⚠️ [Rede] Broker ainda indisponível (%v). Tentando novamente em 3s...\n", token.Error())
+		time.Sleep(3 * time.Second)
 	}
+	fmt.Println("✅ [Rede] Conectado ao cluster MQTT com sucesso!")
 
 	topicoComando := fmt.Sprintf("drones/cmd/%s", meuID)
 

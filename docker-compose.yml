@@ -1,23 +1,70 @@
 services:
-  broker-mqtt:
-    image: eclipse-mosquitto
-    container_name: broker-mqtt
+  # ==========================================
+  # CLUSTER DE BROKERS EMQX
+  # ==========================================
+  emqx1:
+    image: emqx:5.3
+    container_name: emqx1
+    environment:
+      - EMQX_NODE_NAME=emqx@node1.emqx.io
+      - EMQX_CLUSTER__DISCOVERY_STRATEGY=static
+      - EMQX_CLUSTER__STATIC__SEEDS=emqx@node1.emqx.io,emqx@node2.emqx.io,emqx@node3.emqx.io
     ports:
       - "1883:1883"
-    volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - "18083:18083"
+      - "8083:8083"
     networks:
-      - minha_rede
+      minha_rede:
+        aliases:
+          - node1.emqx.io
 
+  emqx2:
+    image: emqx:5.3
+    container_name: emqx2
+    environment:
+      - EMQX_NODE_NAME=emqx@node2.emqx.io
+      - EMQX_CLUSTER__DISCOVERY_STRATEGY=static
+      - EMQX_CLUSTER__STATIC__SEEDS=emqx@node1.emqx.io,emqx@node2.emqx.io,emqx@node3.emqx.io
+    ports:
+      - "1884:1883"
+      - "8084:8083"
+    networks:
+      minha_rede:
+        aliases:
+          - node2.emqx.io
+
+  emqx3:
+    image: emqx:5.3
+    container_name: emqx3
+    environment:
+      - EMQX_NODE_NAME=emqx@node3.emqx.io
+      - EMQX_CLUSTER__DISCOVERY_STRATEGY=static
+      - EMQX_CLUSTER__STATIC__SEEDS=emqx@node1.emqx.io,emqx@node2.emqx.io,emqx@node3.emqx.io
+    ports:
+      - "1885:1883"
+      - "8085:8083"
+    networks:
+      minha_rede:
+        aliases:
+          - node3.emqx.io
+
+  # ==========================================
+  # CONTROLADORES (O Cluster Raft)
+  # ==========================================
   controlador-1:
     build: ./controlador
     container_name: controlador-1
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
+    ports:
+      - "9001:9000" # Expondo para a rede física do lab
     environment:
       - CONTROLLER_ID=Controlador_1
       - CONTROLLER_PORT=9000
-      - PEERS_RPC=controlador-2:9000,controlador-3:9000
+      - PEERS_RPC=${IP_CTRL_2:-controlador-2}:${PORT_CTRL_2:-9000},${IP_CTRL_3:-controlador-3}:${PORT_CTRL_3:-9000}
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
 
@@ -25,11 +72,16 @@ services:
     build: ./controlador
     container_name: controlador-2
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
+    ports:
+      - "9002:9000" # Expondo para a rede física do lab
     environment:
       - CONTROLLER_ID=Controlador_2
       - CONTROLLER_PORT=9000
-      - PEERS_RPC=controlador-1:9000,controlador-3:9000
+      - PEERS_RPC=${IP_CTRL_1:-controlador-1}:${PORT_CTRL_1:-9000},${IP_CTRL_3:-controlador-3}:${PORT_CTRL_3:-9000}
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
   
@@ -37,21 +89,32 @@ services:
     build: ./controlador
     container_name: controlador-3
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
+    ports:
+      - "9003:9000" # Expondo para a rede física do lab
     environment:
       - CONTROLLER_ID=Controlador_3
       - CONTROLLER_PORT=9000
-      - PEERS_RPC=controlador-1:9000,controlador-2:9000
+      - PEERS_RPC=${IP_CTRL_1:-controlador-1}:${PORT_CTRL_1:-9000},${IP_CTRL_2:-controlador-2}:${PORT_CTRL_2:-9000}
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
 
+  # ==========================================
+  # SENSORES E DRONES
+  # ==========================================
   sensor-norte:
     build: ./sensor
     container_name: sensor-norte
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
     environment:
       - SETOR_NOME=Norte
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
 
@@ -59,9 +122,12 @@ services:
     build: ./sensor
     container_name: sensor-sul
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
     environment:
       - SETOR_NOME=Sul
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
 
@@ -69,9 +135,12 @@ services:
     build: ./drone
     container_name: drone-01
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
     environment:
       - DRONE_ID=drone_01
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
   
@@ -79,9 +148,12 @@ services:
     build: ./drone
     container_name: drone-02
     depends_on:
-      - broker-mqtt
+      - emqx1
+      - emqx2
+      - emqx3
     environment:
       - DRONE_ID=drone_02
+      - BROKERS=tcp://${IP_EMQX_1:-emqx1}:${PORT_EMQX_1:-1883},tcp://${IP_EMQX_2:-emqx2}:${PORT_EMQX_2:-1883},tcp://${IP_EMQX_3:-emqx3}:${PORT_EMQX_3:-1883}
     networks:
       - minha_rede
   

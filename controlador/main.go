@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,11 +21,29 @@ type Drone struct {
 	Setor  string
 }
 
-// Estruturas do Log
+type AlertaSensor struct {
+	Setor       string `json:"setor"`
+	Coordenadas string `json:"coordenadas"`
+	Gravidade   string `json:"gravidade"`
+	Timestamp   string `json:"timestamp"`
+}
+
+type StatusDrone struct {
+	DroneID string `json:"drone_id"`
+	Status  string `json:"status"`
+}
+
+type RequisicaoFila struct {
+	Acao   string
+	Alerta AlertaSensor
+}
+type RespostaFila struct {
+	Sucesso bool
+}
+
 type RequisicaoLog struct{ DroneID, Status, Setor string }
 type RespostaLog struct{ Sucesso bool }
 
-// Estruturas para Eleição e Heartbeat do Raft
 type RequisicaoPing struct {
 	Termo   int
 	LiderID string
@@ -40,36 +59,38 @@ type RespostaVoto struct {
 	VotoConcedido bool
 }
 
-// ==========================================
-// 2. O CONTROLADOR (A Máquina de Estados)
-// ==========================================
 type Controlador struct {
 	ID            string
-	EstadoRaft    string // "LIDER", "SEGUIDOR", "CANDIDATO"
-	TermoAtual    int    // O "ano" da eleição atual
-	VotouEm       string // Em quem eu votei nesta eleição
+	EstadoRaft    string
+	TermoAtual    int
+	VotouEm       string
 	UltimoContato time.Time
 	Frota         map[string]*Drone
+	FilaPendentes []AlertaSensor
 	Mutex         sync.Mutex
 	MqttClient    mqtt.Client
 	PeersRPC      []string
 }
 
-type AlertaSensor struct {
-	Setor       string `json:"setor"`
-	Coordenadas string `json:"coordenadas"`
-	Gravidade   string `json:"gravidade"`
-}
-
-type StatusDrone struct {
-	DroneID string `json:"drone_id"`
-	Status  string `json:"status"`
-}
-
-// O SERVIÇO RPC (As funções chamadas via rede)
 type ServicoRaft struct{ C *Controlador }
 
-// Sincroniza o Log do Drones (O caderninho)
+// Função auxiliar para calcular o peso da gravidade
+func pesoGravidade(g string) int {
+	switch g {
+	case "ALTA":
+		return 3
+	case "MEDIA":
+		return 2
+	case "BAIXA":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// ==========================================
+// 3. O SERVIÇO RPC (As funções chamadas via rede)
+// ==========================================
 func (s *ServicoRaft) SincronizarLog(req *RequisicaoLog, res *RespostaLog) error {
 	s.C.Mutex.Lock()
 	defer s.C.Mutex.Unlock()
@@ -81,43 +102,65 @@ func (s *ServicoRaft) SincronizarLog(req *RequisicaoLog, res *RespostaLog) error
 	return nil
 }
 
-// NOVO: Receber o Ping do Líder (Heartbeat)
+func (s *ServicoRaft) SincronizarFila(req *RequisicaoFila, res *RespostaFila) error {
+	s.C.Mutex.Lock()
+	defer s.C.Mutex.Unlock()
+
+	if req.Acao == "ADICIONAR" {
+		s.C.FilaPendentes = append(s.C.FilaPendentes, req.Alerta)
+
+		sort.Slice(s.C.FilaPendentes, func(i, j int) bool {
+			pesoA := pesoGravidade(s.C.FilaPendentes[i].Gravidade)
+			pesoB := pesoGravidade(s.C.FilaPendentes[j].Gravidade)
+			if pesoA != pesoB {
+				return pesoA > pesoB
+			}
+			tempoA, _ := time.Parse(time.RFC3339, s.C.FilaPendentes[i].Timestamp)
+			tempoB, _ := time.Parse(time.RFC3339, s.C.FilaPendentes[j].Timestamp)
+			return tempoA.Before(tempoB)
+		})
+		fmt.Printf("[RPC Fila] 📥 Setor %s adicionado à fila replicada!\n", req.Alerta.Setor)
+
+	} else if req.Acao == "REMOVER" && len(s.C.FilaPendentes) > 0 {
+		s.C.FilaPendentes = s.C.FilaPendentes[1:]
+		fmt.Println("[RPC Fila] 📤 Primeiro item removido da fila replicada!")
+	}
+
+	res.Sucesso = true
+	return nil
+}
+
 func (s *ServicoRaft) Ping(req *RequisicaoPing, res *RespostaPing) error {
 	s.C.Mutex.Lock()
 	defer s.C.Mutex.Unlock()
 
-	// Se ouviu alguém com um termo (eleição) maior ou igual, reconhece o líder e abaixa a cabeça
 	if req.Termo >= s.C.TermoAtual {
 		s.C.EstadoRaft = "SEGUIDOR"
 		s.C.TermoAtual = req.Termo
-		s.C.UltimoContato = time.Now() // Zera o cronômetro da morte!
+		s.C.UltimoContato = time.Now()
 	}
 	res.Sucesso = true
 	return nil
 }
 
-// NOVO: Receber um pedido de voto de um Candidato
 func (s *ServicoRaft) PedirVoto(req *RequisicaoVoto, res *RespostaVoto) error {
 	s.C.Mutex.Lock()
 	defer s.C.Mutex.Unlock()
 
-	// Se o candidato está numa eleição mais antiga, negamos o voto
 	if req.Termo < s.C.TermoAtual {
 		res.VotoConcedido = false
 		return nil
 	}
 
-	// Se a eleição for nova, atualiza o termo e limpa o voto anterior
 	if req.Termo > s.C.TermoAtual {
 		s.C.TermoAtual = req.Termo
 		s.C.EstadoRaft = "SEGUIDOR"
 		s.C.VotouEm = ""
 	}
 
-	// Se ainda não votei em ninguém neste termo, eu concedo o voto
 	if s.C.VotouEm == "" || s.C.VotouEm == req.CandidatoID {
 		s.C.VotouEm = req.CandidatoID
-		s.C.UltimoContato = time.Now() // Reinicia o cronômetro por segurança
+		s.C.UltimoContato = time.Now()
 		res.VotoConcedido = true
 		fmt.Printf("[Raft] Votei no Candidato %s para o Termo %d!\n", req.CandidatoID, req.Termo)
 	} else {
@@ -127,7 +170,6 @@ func (s *ServicoRaft) PedirVoto(req *RequisicaoVoto, res *RespostaVoto) error {
 	return nil
 }
 
-// Heartbeats e Eleições
 func (c *Controlador) IniciarMotorRaft() {
 	for {
 		c.Mutex.Lock()
@@ -136,7 +178,6 @@ func (c *Controlador) IniciarMotorRaft() {
 
 		switch estadoAtual {
 		case "LIDER":
-			// Manda Ping para todo mundo a cada 1 segundo
 			req := RequisicaoPing{Termo: c.TermoAtual, LiderID: c.ID}
 			for _, peer := range c.PeersRPC {
 				go func(p string) {
@@ -150,7 +191,6 @@ func (c *Controlador) IniciarMotorRaft() {
 			time.Sleep(1 * time.Second)
 
 		case "SEGUIDOR":
-			// Espera um tempo aleatório entre 2 e 4 segundos
 			timeout := time.Duration(rand.Intn(2000)+2000) * time.Millisecond
 			time.Sleep(timeout)
 
@@ -158,7 +198,6 @@ func (c *Controlador) IniciarMotorRaft() {
 			tempoSemOuvirLider := time.Since(c.UltimoContato)
 			c.Mutex.Unlock()
 
-			// Se estourou o tempo, o líder caiu! Eu viro candidato.
 			if tempoSemOuvirLider >= timeout {
 				fmt.Println("\n⚠️ [Raft] Líder sumiu! Iniciando nova eleição...")
 				c.Mutex.Lock()
@@ -174,10 +213,9 @@ func (c *Controlador) IniciarMotorRaft() {
 			c.UltimoContato = time.Now()
 			c.Mutex.Unlock()
 
-			fmt.Printf("👑 [Raft] %s se candidatou para o Termo %d. Pedindo votos...\n", c.ID, meuTermo)
+			fmt.Printf("[Raft] %s se candidatou para o Termo %d. Pedindo votos...\n", c.ID, meuTermo)
 			votos := 1
 
-			// Pedir votos para os outros contêineres
 			for _, peer := range c.PeersRPC {
 				req := RequisicaoVoto{Termo: meuTermo, CandidatoID: c.ID}
 				var res RespostaVoto
@@ -192,40 +230,38 @@ func (c *Controlador) IniciarMotorRaft() {
 				}
 			}
 
-			// Ganhei a maioria?
 			maioria := (len(c.PeersRPC)+1)/2 + 1
 			c.Mutex.Lock()
 			if votos >= maioria && c.EstadoRaft == "CANDIDATO" {
-				fmt.Printf("🎉 [Raft] FUI ELEITO! %s agora é o NOVO LÍDER!\n\n", c.ID)
+				fmt.Printf("[Raft] FUI ELEITO! %s agora é o NOVO LÍDER!\n\n", c.ID)
 				c.EstadoRaft = "LIDER"
 			} else {
-				// Perdi ou empatei, volto a ser seguidor para tentar de novo
 				c.EstadoRaft = "SEGUIDOR"
 			}
 			c.Mutex.Unlock()
-
-			// Pausa curta antes do próximo ciclo
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
 
-// Callback para quando o drone avisa que terminou o serviço
+// ==========================================
+// CALLBACKS MQTT
+// ==========================================
 func (c *Controlador) AoReceberAlertaMQTT(client mqtt.Client, msg mqtt.Message) {
+
+	fmt.Printf("[DEBUG] Controlador %s ouviu: %s | Conteúdo: %s\n", c.ID, msg.Topic(), string(msg.Payload()))
 	c.Mutex.Lock()
 	if c.EstadoRaft != "LIDER" {
 		c.Mutex.Unlock()
 		return
 	}
 
-	// Decodifica o JSON do Sensor
 	var alerta AlertaSensor
 	if err := json.Unmarshal(msg.Payload(), &alerta); err != nil {
 		c.Mutex.Unlock()
 		return
 	}
 
-	// Procura um drone livre
 	var droneEscolhido *Drone
 	for _, d := range c.Frota {
 		if d.Status == "LIVRE" {
@@ -235,7 +271,6 @@ func (c *Controlador) AoReceberAlertaMQTT(client mqtt.Client, msg mqtt.Message) 
 	}
 	c.Mutex.Unlock()
 
-	// Despacha ou avisa que não tem drone
 	if droneEscolhido != nil {
 		req := RequisicaoLog{DroneID: droneEscolhido.ID, Status: "OCUPADO", Setor: alerta.Setor}
 		votos := 1
@@ -258,13 +293,46 @@ func (c *Controlador) AoReceberAlertaMQTT(client mqtt.Client, msg mqtt.Message) 
 			c.Mutex.Unlock()
 
 			fmt.Printf(" -> ✅ Despachando %s via MQTT para o Setor %s!\n", droneEscolhido.ID, alerta.Setor)
-
-			// Constrói a Ordem de Voo em JSON para o Drone
 			ordemJSON := fmt.Sprintf(`{"setor": "%s", "coordenadas": "%s"}`, alerta.Setor, alerta.Coordenadas)
 			c.MqttClient.Publish("drones/cmd/"+droneEscolhido.ID, 1, false, ordemJSON)
 		}
 	} else {
-		fmt.Println(" -> ⚠️ Ignorando requisição: Nenhum drone LIVRE no momento!")
+		reqFila := RequisicaoFila{Acao: "ADICIONAR", Alerta: alerta}
+		votosFila := 1
+
+		for _, peer := range c.PeersRPC {
+			cliente, err := rpc.Dial("tcp", peer)
+			if err == nil {
+				var resFila RespostaFila
+				if cliente.Call("ServicoRaft.SincronizarFila", &reqFila, &resFila) == nil && resFila.Sucesso {
+					votosFila++
+				}
+				cliente.Close()
+			}
+		}
+
+		maioria := (len(c.PeersRPC)+1)/2 + 1
+		if votosFila >= maioria {
+			c.Mutex.Lock()
+			c.FilaPendentes = append(c.FilaPendentes, alerta)
+
+			sort.Slice(c.FilaPendentes, func(i, j int) bool {
+				pesoA := pesoGravidade(c.FilaPendentes[i].Gravidade)
+				pesoB := pesoGravidade(c.FilaPendentes[j].Gravidade)
+				if pesoA != pesoB {
+					return pesoA > pesoB
+				}
+				tempoA, _ := time.Parse(time.RFC3339, c.FilaPendentes[i].Timestamp)
+				tempoB, _ := time.Parse(time.RFC3339, c.FilaPendentes[j].Timestamp)
+				return tempoA.Before(tempoB)
+			})
+
+			tamanhoFila := len(c.FilaPendentes)
+			proximoFila := c.FilaPendentes[0]
+			c.Mutex.Unlock()
+
+			fmt.Printf(" -> ⚠️ [Consenso Fila] Tamanho: %d | Próximo: Setor %s (Grav: %s)\n", tamanhoFila, proximoFila.Setor, proximoFila.Gravidade)
+		}
 	}
 }
 
@@ -276,13 +344,11 @@ func (c *Controlador) AoReceberStatusDrone(client mqtt.Client, msg mqtt.Message)
 	}
 	c.Mutex.Unlock()
 
-	// Decodifica o JSON do Drone avisando que terminou
 	var status StatusDrone
 	if err := json.Unmarshal(msg.Payload(), &status); err != nil {
 		return
 	}
 
-	// Dispara o RPC para o cluster avisando que o drone está livre
 	req := RequisicaoLog{DroneID: status.DroneID, Status: status.Status, Setor: "base"}
 	votos := 1
 	for _, peer := range c.PeersRPC {
@@ -296,7 +362,6 @@ func (c *Controlador) AoReceberStatusDrone(client mqtt.Client, msg mqtt.Message)
 		}
 	}
 
-	// Confirma o reset no próprio caderninho
 	maioria := (len(c.PeersRPC)+1)/2 + 1
 	if votos >= maioria {
 		c.Mutex.Lock()
@@ -304,13 +369,42 @@ func (c *Controlador) AoReceberStatusDrone(client mqtt.Client, msg mqtt.Message)
 			d.Status = status.Status
 			d.Setor = "base"
 		}
+
+		// Lógica para pegar da fila e consumir
+		temFila := len(c.FilaPendentes) > 0
+		var proximoAlerta AlertaSensor
+
+		if temFila {
+			proximoAlerta = c.FilaPendentes[0]
+			c.FilaPendentes = c.FilaPendentes[1:] // Remove do Líder
+		}
 		c.Mutex.Unlock()
-		fmt.Printf(" -> 🔄 [Raft] O %s terminou e foi marcado como %s no cluster inteiro!\n", status.DroneID, status.Status)
+
+		fmt.Printf(" -> 🔄 [Raft] O %s terminou e foi marcado como %s!\n", status.DroneID, status.Status)
+
+		if temFila {
+			// 1. Avisa os seguidores para removerem o item da fila via RPC
+			reqFila := RequisicaoFila{Acao: "REMOVER"}
+			for _, peer := range c.PeersRPC {
+				go func(p string) {
+					cliente, err := rpc.Dial("tcp", p)
+					if err == nil {
+						cliente.Call("ServicoRaft.SincronizarFila", &reqFila, &RespostaFila{})
+						cliente.Close()
+					}
+				}(peer)
+			}
+
+			// 2. Despacha o alerta para ser processado de novo
+			fmt.Printf(" -> 🚨 PROCESSANDO FILA: Atendendo Setor %s (Gravidade: %s)!\n", proximoAlerta.Setor, proximoAlerta.Gravidade)
+			alertaJSON, _ := json.Marshal(proximoAlerta)
+			topico := fmt.Sprintf("setor/%s/emergencia", proximoAlerta.Setor)
+			c.MqttClient.Publish(topico, 1, false, alertaJSON)
+		}
 	}
 }
 
 func main() {
-	// para a aleatoriedade do tempo funcionar
 	rand.Seed(time.Now().UnixNano())
 
 	meuID := os.Getenv("CONTROLLER_ID")
@@ -331,37 +425,55 @@ func main() {
 			"drone_01": {ID: "drone_01", Status: "LIVRE", Setor: "base"},
 			"drone_02": {ID: "drone_02", Status: "LIVRE", Setor: "base"},
 		},
-		PeersRPC: listaPeers,
+		FilaPendentes: []AlertaSensor{}, // Inicializa a fila vazia
+		PeersRPC:      listaPeers,
 	}
 
-	// Inicia RPC
 	servico := &ServicoRaft{C: meuControlador}
 	rpc.Register(servico)
 	listener, _ := net.Listen("tcp", ":"+minhaPorta)
 	go rpc.Accept(listener)
 
-	// Inicia Motor do Raft em paralelo
 	go meuControlador.IniciarMotorRaft()
 
-	// Configura MQTT
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker("tcp://broker-mqtt:1883")
+	brokersEnv := os.Getenv("BROKERS")
+	if brokersEnv == "" {
+		brokersEnv = "tcp://localhost:1883"
+	}
+
+	listaBrokers := strings.Split(brokersEnv, ",")
+	for _, brokerURL := range listaBrokers {
+		opts.AddBroker(brokerURL)
+	}
 	opts.SetClientID("Raft_" + meuID)
 	meuControlador.MqttClient = mqtt.NewClient(opts)
 
-	fmt.Println("[Sistema] Aguardando broker...")
+	fmt.Println("[Rede] Tentando conectar ao cluster MQTT...")
 	for {
-		if token := meuControlador.MqttClient.Connect(); token.Wait() && token.Error() == nil {
+		token := meuControlador.MqttClient.Connect()
+		token.Wait()
+		if token.Error() == nil {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		fmt.Printf("⚠️ [Rede] Broker indisponível (%v). Tentando em 3s...\n", token.Error())
+		time.Sleep(3 * time.Second)
 	}
-	fmt.Printf("[MQTT] Conectado! Nós online: %s\n", meuID)
+	fmt.Printf("✅ [MQTT] Conectado! Nó online: %s\n", meuID)
 
-	// Controlador escuta os gritos de socorro dos sensores
-	meuControlador.MqttClient.Subscribe("setor/+/emergencia", 1, meuControlador.AoReceberAlertaMQTT)
+	tokenAlerta := meuControlador.MqttClient.Subscribe("setor/+/emergencia", 1, meuControlador.AoReceberAlertaMQTT)
+	if tokenAlerta.Wait() && tokenAlerta.Error() != nil {
+		fmt.Printf("[DEBUG] Erro ao assinar emergências: %v\n", tokenAlerta.Error())
+	} else {
+		fmt.Println("[DEBUG] Controlador inscrito com sucesso em 'setor/+/emergencia'")
+	}
 
-	// Controlador escuta os drones avisando que terminaram o serviço
-	meuControlador.MqttClient.Subscribe("drones/status/+", 1, meuControlador.AoReceberStatusDrone)
+	tokenDrone := meuControlador.MqttClient.Subscribe("drones/status/+", 1, meuControlador.AoReceberStatusDrone)
+	if tokenDrone.Wait() && tokenDrone.Error() != nil {
+		fmt.Printf("[DEBUG] Erro ao assinar status dos drones: %v\n", tokenDrone.Error())
+	} else {
+		fmt.Println("[DEBUG] Controlador inscrito com sucesso em 'drones/status/+'")
+	}
+
 	select {}
 }
