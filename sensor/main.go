@@ -15,7 +15,7 @@ import (
 type AlertaSensor struct {
 	Setor       string `json:"setor"`
 	Coordenadas string `json:"coordenadas"`
-	Gravidade   string `json:"gravidade"` // ALTA, MEDIA, BAIXA
+	Gravidade   string `json:"gravidade"`
 	Timestamp   string `json:"timestamp"`
 }
 

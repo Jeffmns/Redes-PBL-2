@@ -19,7 +19,7 @@ type OrdemDeVoo struct {
 // Estrutura do status que o Drone vai devolver
 type StatusDrone struct {
 	DroneID string `json:"drone_id"`
-	Status  string `json:"status"` // LIVRE, OCUPADO, MANUTENCAO
+	Status  string `json:"status"` // LIVRE, OCUPADO
 }
 
 var meuID string
